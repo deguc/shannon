@@ -1,3 +1,158 @@
+#%%
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+def onehot(x):
+    
+    k=x.max()+1
+
+    return np.identity(k)[x]
+
+
+def make_data(x,y,size=10,loc=0,scale=0.1):
+
+    X,Y=[],[]
+    k=x.shape[1]
+
+    for x0,y0 in zip(x,y):
+        X += [x0+np.random.normal(size=(size,k),loc=loc,scale=scale)]
+        Y += [np.full(size,y0)]
+    
+    X=np.vstack(X)
+    Y=np.hstack(Y)
+
+    Y=onehot(Y)
+
+    idx=np.random.permutation(X.shape[0])
+
+    X=X[idx]
+    Y=Y[idx]
+
+    return X,Y
+
+
+def softmax(x):
+
+    c = np.max(x,axis=1,keepdims=True)
+    e = np.exp(x-c)
+    z = np.sum(e,axis=1,keepdims=True)
+
+    return e/z
+
+
+def cross_entropy(t,y):
+    
+    eps=1e-7
+    n=t.shape[0]
+
+    return -np.sum(t*np.log(y+eps)) / n
+
+
+def make_zeros_like(ps):
+
+    gs=[]
+
+    for p in ps:
+        gs +=[np.zeros_like(p)]
+    
+    return gs
+
+
+class Affine:
+
+    def __init__(self,input_dim,output_dim):
+
+        W=np.random.randn(input_dim,output_dim)
+        b=np.zeros(output_dim)
+
+        self.ps=[W,b]
+        self.gs=make_zeros_like(self.ps)
+
+        self.X = None
+
+        self.train_flag=True
+
+
+    def forward(self,X):
+
+        W,b=self.ps
+
+        y = X @ W + b
+
+        self.X = X
+
+        return y
+
+    def backward(self,dout):
+
+        W,b = self.ps
+        X = self.X
+
+        dW = X.T @ dout
+        db = np.sum(dout,axis=0)
+        dout = dout @ W.T
+
+        self.gs[0][...] = dW
+        self.gs[1][...] = db
+
+        return dout
+
+
+class LRelu:
+
+    def __init__(self,alpha=0.01):
+        
+        self.ps,self.gs=[],[]
+
+        self.mask=None
+        self.alpha=alpha
+
+        self.train_flag=True
+
+    
+    def forward(self,X):
+        
+        alpha=self.alpha
+
+        mask = (X < 0)
+        X[mask] *= alpha
+
+        self.mask=mask
+
+        return X
+    
+    
+    def backward(self,dout):
+        
+        mask = self.mask
+        alpha = self.alpha
+
+        dout[mask] *= alpha
+
+        return dout
+
+
+class SGD:
+
+    def __init__(self,eta=0.01,weight_decay=0.0):
+
+        self.eta=eta
+        self.weight_decay = weight_decay
+    
+
+    def __call__(self,ps,gs):
+
+        eta = self.eta
+        weight_decay = self.weight_decay
+
+        for p,g in zip(ps,gs):
+
+            g += weight_decay * p
+
+            p -= eta * g
+    
+
 class Dropout:
 
     def __init__(self,r=0.5):
@@ -21,3 +176,116 @@ class Dropout:
             X = X*(1-r)
         
         return X
+        
+
+    def backward(self,dout):
+
+        return dout * self.mask
+        
+        
+
+class Layers:
+
+    def __init__(self,dims,act=LRelu(),dropout=0.0):
+
+        input_dim,hidden_dim,output_dim = dims
+
+        a1=Affine(input_dim,hidden_dim)
+        dpt = Dropout(r=dropout)
+        act=act
+        a2=Affine(hidden_dim,output_dim)
+
+
+        self.layers=[a1,dpt,act,a2]
+
+        self.ps,self.gs=[],[]
+
+        for l in self.layers:
+
+            self.ps += l.ps
+            self.gs += l.gs
+    
+
+    def forward(self,X):
+
+        for l in self.layers:
+            X = l.forward(X)
+        
+        return X
+    
+
+    def backward(self,dout):
+
+        for l in reversed(self.layers):
+            dout = l.backward(dout)
+
+
+    def __call__(self,x):
+
+        for l in self.layers:
+            l.train_flag=False
+
+        y = self.forward(x)
+
+        return np.argmax(y,axis=1) 
+    
+
+    def fit(self,X,T,epochs=100,batch_size=20,optimizer=SGD()):
+
+        loss=[]
+        data_size=X.shape[0]
+        iter =  data_size // batch_size
+
+        for l in self.layers:
+            l.train_flag = True
+
+        for __ in range(epochs):
+
+            l = 0
+
+            for __ in range(iter):
+
+                idx = np.random.choice(data_size,batch_size)
+                x,t = X[idx],T[idx]
+                y = softmax(self.forward(x))
+                delta=y-t
+                self.backward(delta)
+
+                l += cross_entropy(t,y)
+
+                optimizer(self.ps,self.gs)
+            loss += [l/iter]
+
+        return loss
+    
+
+x=np.array([[0,0],[0,1],[1,0],[1,1]])
+y=np.array([0,1,1,1])
+
+X,Y=make_data(x,y,size=10)
+
+input_dim = x.shape[1]
+hidden_dim = 5
+output_dim = Y.shape[1]
+
+dims=[input_dim,hidden_dim,output_dim]
+
+model1 = Layers(dims)
+loss1=model1.fit(X,Y)
+pred=model1(x)
+print(pred)
+
+model2 = Layers(dims,dropout=0.25)
+loss2=model2.fit(X,Y,optimizer=SGD(weight_decay=0.1))
+
+
+fig = plt.figure(figsize=(6,4))
+ax = fig.add_subplot()
+ax.set_title('Loss Function')
+ax.set_xlabel('epochs')
+ax.set_ylabel('cross entryphy')
+ax.plot(loss1,c='b',label='Dropout Ratio = 0.0')
+ax.plot(loss2,c='r',label='Dropout Ratio = 0.25')
+ax.legend()
+plt.show()
+
