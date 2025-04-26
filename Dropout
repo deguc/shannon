@@ -1,0 +1,23 @@
+class Dropout:
+
+    def __init__(self,r=0.5):
+
+        self.ps,self.gs=[],[]
+        self.r = r
+        self.mask = None
+        self.train_flag=True
+    
+    def forward(self,X):
+
+        r=self.r
+
+        if self.train_flag:
+
+            mask = np.random.rand(*X.shape) > r
+            X = X * mask
+            self.mask = mask
+        
+        else:
+            X = X*(1-r)
+        
+        return X
