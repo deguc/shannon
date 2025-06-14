@@ -1,0 +1,314 @@
+#%%
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.colors import ListedColormap
+
+def onehot(x):
+    k = x.max()+1
+
+    return np.identity(k)[x]
+
+def cross_entropy(y,t):
+    eps = 1e-6
+
+    return np.sum(-t*np.log(y+eps)) / x.shape[0]
+
+def softmax(x):
+    c = np.max(x,axis=1,keepdims=True)
+    e = np.exp(x-c)
+    z = np.sum(e,axis=1,keepdims=True)
+
+    return e/z
+
+def make_data(x,y,size=10,loc=0,scale=0.1):
+
+    X,Y = [],[]
+    k = x.shape[1]
+
+    for x0,y0 in zip(x,y):
+
+        X += [x0+np.random.normal(size=(size,k),loc=loc,scale=scale)]
+        Y += [np.full(size,y0)]
+    
+    X = np.vstack(X)
+    Y = onehot(np.hstack(Y))
+
+    idx = np.random.permutation(X.shape[0])
+
+    return X[idx],Y[idx]
+
+def zeros_ps(ps):
+
+    gs = []
+
+    for p in ps:
+        gs += [np.zeros_like(p)]
+    
+    return gs
+
+def decision_regions(x,y,ax,model,resolution=200):
+
+    colors=['red','blue','green','orange']
+    cmap = ListedColormap(colors[:y.shape[1]])
+
+    xmin=x.min()-0.1
+    xmax=x.max()+0.1
+    x1 = np.linspace(xmin,xmax,resolution)
+    x2 = np.linspace(xmin,xmax,resolution)
+    xx1,xx2 = np.meshgrid(x1,x2)
+    xx = np.array([xx1.flatten(),xx2.flatten()]).T
+    z = model(xx).reshape(xx1.shape)
+    ax.contourf(xx1,xx2,z,cmap=cmap,alpha=0.4)
+
+    ax.scatter(x[:,0],x[:,1],c=[colors[np.argmax(k)] for k in y])
+
+class Linear:
+
+    def __init__(self,num_inputs,num_outputs):
+
+        std = np.sqrt(num_inputs/2)
+        W = np.random.randn(num_inputs,num_outputs)/std
+        b = np.zeros(num_outputs)
+
+        self.ps = [W,b]
+        self.gs = zeros_ps(self.ps)
+        
+        self.inputs = None
+        self.train_flag = None
+    
+    def __call__(self,X):
+
+        W,b = self.ps
+        self.inputs = X
+
+        return X @ W + b
+    
+    def backward(self,dout):
+
+        self.gs[0][...] = self.inputs.T @ dout
+        self.gs[1][...] = np.sum(dout,axis=0)
+
+        return dout @ self.ps[0].T
+
+class ReLU:
+
+    def __init__(self):
+
+        self.ps,self.gs = [],[]
+        self.mask = None
+        self.train_flag=None
+    
+    def __call__(self,X):
+
+        self.mask = (X>0)
+
+        return X * self.mask
+    
+    def backward(self,dout):
+
+        return dout * self.mask
+
+class Adam:
+
+
+    def __init__(self,lr=0.01,alpha=0.25,beta=0.9,weight_decay=0.02):
+        self.cache = (lr,alpha,beta)
+        self.weight_decay = weight_decay
+        self.ms,self.hs = [],[]
+        self.n = 0
+    
+    def __call__(self,ps,gs):
+        
+        eps = 1e-6
+        lr,alpha,beta = self.cache
+        self.n += 1
+        n = self.n
+
+        if self.hs == []:
+            self.hs = zeros_ps(ps)
+            self.ms = zeros_ps(ps)
+        
+        for p,g,m,h in zip(ps,gs,self.ms,self.hs):
+            g += self.weight_decay * p
+            m = alpha * m + (1-alpha) * g
+            h = beta * h + (1-beta) * g*g
+            m_ = m/(1-alpha**n)
+            h_ = h/(1-beta**n)
+
+            p -= lr*m_/(np.sqrt(h_)+eps)
+class BatchNorm:
+
+    def __init__(self,dim,momentum=0.9):
+
+        gamma = np.ones(dim)
+        beta = np.zeros(dim)
+
+        self.ps = [gamma,beta]
+        self.gs = zeros_ps(self.ps)
+
+        self.cache = None
+        self.train_flag=None
+        self.momentum =momentum
+        self.run_u = 0
+        self.run_var = 0
+    
+    def __call__(self,X):
+
+        eps = 1e-6
+        gamma,beta = self.ps
+        m = self.momentum
+
+        if self.train_flag:
+            u = X.mean(axis=0)
+            var = X.var(axis=0)
+            centered = X-u
+            std_inv = 1/np.sqrt(var+eps)
+            norm = centered * std_inv
+            self.run_u = m*self.run_u+(1-m)*u
+            self.run_var = m*self.run_var+(1-m)*var
+            self.cache = (centered,std_inv,norm)
+        else:
+            norm = (X-self.run_u)/(np.sqrt(self.run_var)+eps)
+
+        return gamma * norm + beta
+
+    def backward(self,dout):
+
+        gamma,beta = self.ps
+
+        centered,std_inv,norm = self.cache
+
+        N = dout.shape[0]
+
+        dnorm = dout * gamma
+        dvar = np.sum(dnorm*centered*(-0.5)*std_inv**3,axis=0)
+        du = -np.sum(dnorm*std_inv,axis=0)-2.*np.mean(dvar*centered,axis=0)
+
+        self.gs[0][...] = np.sum(dout * norm ,axis=0)
+        self.gs[1][...] = np.sum(dout,axis=0)
+
+        return dnorm * std_inv + 2*dvar*centered/N + du/N
+
+class Dropout:
+
+    def __init__(self,r=0.1):
+        
+        self.ps,self.gs = [],[]
+        self.mask = None
+        self.r= r
+        self.train_flag= None
+    
+    def __call__(self,X):
+
+        if self.train_flag:
+            r = self.r
+        else:
+            r = 0
+
+        self.mask = np.random.rand(*X.shape) > r
+
+        return X * self.mask
+    
+    def backward(self,dout):
+
+        return dout * self.mask
+
+
+
+class Layers:
+
+    def __init__(self,layers):
+
+        self.layers = layers
+        self.ps,self.gs = [],[]
+
+        for l in self.layers:
+            self.ps += l.ps
+            self.gs += l.gs
+
+    
+    def forward(self,X):
+
+        for l in self.layers:
+            X = l(X)
+        
+        return X
+    
+    def backward(self,dout):
+
+        for l in reversed(self.layers):
+            dout = l.backward(dout)
+
+    def fit(self,X,labels,epochs=200,batch_size=10,optimizer=Adam()):
+        
+        N = X.shape[0]
+        iter = N // batch_size
+        loss = []
+
+        self.trian()
+
+        for __ in range(epochs):
+
+            l = 0
+
+            for __ in range(iter):
+                idx = np.random.choice(N,batch_size)
+                x,t = X[idx],labels[idx]
+                y =softmax(self.forward(x))
+                l += cross_entropy(y,t)
+                dout = y- t
+                self.backward(dout)
+                optimizer(self.ps,self.gs)
+            
+            loss += [l/iter]
+        
+        return loss
+    
+    def __call__(self,X):
+        
+        self.eval()
+
+        logits = self.forward(X)
+
+        return np.argmax(logits,axis=1)
+    
+    def set_train_flag(self,b):
+        for l in self.layers:
+            l.train_flag = True
+    
+    def trian(self):
+        self.set_train_flag(True)
+    
+    def eval(self):
+        self.set_train_flag(False)
+
+
+x = np.array([[0,0],[1,0],[0,1],[1,1]])
+y = np.array([0,1,2,3])
+
+X,Y = make_data(x,y,size=10,scale=0.1)
+
+num_inputs = X.shape[1]
+num_hiddens = 5
+num_outputs = Y.shape[1]
+
+l1 = Linear(num_inputs,num_hiddens)
+bn = BatchNorm(num_hiddens)
+a1 = ReLU()
+dp = Dropout()
+l2 = Linear(num_hiddens,num_outputs)
+layers = [l1,bn,a1,dp,l2]
+model = Layers(layers)
+loss=model.fit(X,Y,epochs=100,batch_size=10)
+
+
+fig = plt.figure(figsize=(12,4))
+ax1 = fig.add_subplot(1,2,1)
+ax2 = fig.add_subplot(1,2,2)
+ax1.set_title('Loss Function')
+ax1.set_xlabel('epochs')
+ax1.set_ylabel('cross entropy')
+ax1.plot(loss)
+
+decision_regions(X,Y,ax2,model)
+plt.show()
